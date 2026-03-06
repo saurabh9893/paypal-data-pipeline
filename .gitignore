@@ -1,0 +1,13 @@
+.env
+*.env
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.vscode/
+.DS_Store
+logs/
+airflow.db
+data/
+*.csv
+*.parquet
