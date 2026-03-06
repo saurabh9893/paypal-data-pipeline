@@ -1,62 +1,90 @@
 # ingestion/paypal_client.py
-# Fetches transaction data from PayPal Sandbox API
+# Fetches order data from PayPal Sandbox using Orders API
+# Uses /v2/checkout/orders which works with basic sandbox permissions
 
 import requests
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from ingestion.paypal_auth import get_access_token
 from config.settings import PAYPAL_BASE_URL
 
-def get_transactions(start_date: str = None, end_date: str = None) -> list:
+
+def get_order_details(order_id: str, token: str) -> dict:
     """
-    Fetches transactions from PayPal Reporting API.
+    Fetches details of a single order by ID.
 
     Args:
-        start_date: ISO format e.g. "2024-01-01T00:00:00-0700"
-        end_date:   ISO format e.g. "2024-01-31T23:59:59-0700"
+        order_id: PayPal order ID e.g. "4TG12345XX"
+        token: Bearer token from OAuth2
 
     Returns:
-        List of transaction dicts
+        Order dict with full details
+    """
+    url = f"{PAYPAL_BASE_URL}/v2/checkout/orders/{order_id}"
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+    return response.json()
+
+
+def get_all_orders() -> list:
+    """
+    Reads order IDs from our local sandbox_orders.json
+    and fetches full details for each from PayPal API.
+
+    Returns:
+        List of order dicts with full PayPal data
     """
     token = get_access_token()
 
-    # Default: last 30 days
-    if not start_date:
-        start_date = (datetime.utcnow() - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S-0000")
-    if not end_date:
-        end_date = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S-0000")
+    # Load order IDs we created earlier
+    try:
+        with open("data/sandbox_orders.json", "r") as f:
+            saved_orders = json.load(f)
+    except FileNotFoundError:
+        print("[ERROR] data/sandbox_orders.json not found!")
+        print("        Run: python -m ingestion.create_sandbox_transactions first")
+        return []
 
-    url = f"{PAYPAL_BASE_URL}/v1/reporting/transactions"
-    headers = {"Authorization": f"Bearer {token}"}
-    params = {
-        "start_date": start_date,
-        "end_date": end_date,
-        "fields": "all",
-        "page_size": 100,
-        "page": 1
-    }
+    print(f"[FETCH] Found {len(saved_orders)} orders to fetch...")
 
-    all_transactions = []
+    all_orders = []
 
-    while True:
-        response = requests.get(url, headers=headers, params=params)
-        response.raise_for_status()
-        data = response.json()
+    for i, saved in enumerate(saved_orders, 1):
+        order_id = saved["order_id"]
+        try:
+            details = get_order_details(order_id, token)
 
-        transactions = data.get("transaction_details", [])
-        all_transactions.extend(transactions)
+            # Extract the key fields we care about
+            purchase_unit = details.get("purchase_units", [{}])[0]
+            amount_info   = purchase_unit.get("amount", {})
 
-        # Pagination
-        total_pages = data.get("total_pages", 1)
-        if params["page"] >= total_pages:
-            break
-        params["page"] += 1
-        print(f"[FETCH] Fetched page {params['page']-1}/{total_pages}")
+            order = {
+                "order_id":    details.get("id"),
+                "status":      details.get("status"),
+                "currency":    amount_info.get("currency_code"),
+                "amount":      amount_info.get("value"),
+                "description": purchase_unit.get("description", "N/A"),
+                "created_at":  details.get("create_time"),
+                "updated_at":  details.get("update_time"),
+                "raw":         details
+            }
 
-    print(f"[FETCH] Total transactions fetched: {len(all_transactions)}")
-    return all_transactions
+            all_orders.append(order)
+            print(f"[{i:02d}] ✅ Fetched | {order['description']:<30} | ${order['amount']} | {order['status']}")
+
+        except Exception as e:
+            print(f"[{i:02d}] ❌ Failed  | Order: {order_id} | Error: {e}")
+
+    print(f"\n[FETCH] Total orders fetched: {len(all_orders)}")
+    return all_orders
 
 
 if __name__ == "__main__":
-    transactions = get_transactions()
-    print(json.dumps(transactions[:2], indent=2))  # Preview first 2
+    orders = get_all_orders()
+
+    if orders:
+        print("\n📦 Sample order (first record):")
+        sample = {k: v for k, v in orders[0].items() if k != "raw"}
+        print(json.dumps(sample, indent=2))
